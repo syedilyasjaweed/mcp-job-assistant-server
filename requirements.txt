@@ -1,0 +1,7 @@
+anthropic
+voyageai
+pinecone
+python-dotenv
+fastmcp
+fastapi
+uvicorn
