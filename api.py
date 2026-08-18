@@ -11,6 +11,7 @@ Run locally with:
     uvicorn api:app --reload
 """
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 
 from server import mcp
 
@@ -24,6 +25,11 @@ mcp_app = mcp.http_app(path="/")
 # initialized" error. This is the single most common mistake when mounting
 # FastMCP inside FastAPI.
 app = FastAPI(title="Job Assistant MCP Server", lifespan=mcp_app.lifespan)
+
+
+@app.get("/")
+def root():
+    return RedirectResponse(url="/health")
 
 
 @app.get("/health")
