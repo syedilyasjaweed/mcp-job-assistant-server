@@ -28,7 +28,13 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 CACHE_DIR = Path("data/company_research_cache")
 CACHE_TTL_DAYS = 7  # how many days a cached profile is considered "fresh"
 
-MODEL = "claude-sonnet-4-6"
+# Standardized on claude-sonnet-5 across every Claude call in this server
+# (see cover_letter.py) — cheaper per token than sonnet-4-6 ($2/$10 vs
+# $3/$15), and materially stronger on agentic/tool-use tasks, which is
+# exactly what this call is (Claude decides when/how to use web_search).
+# Its tokenizer produces ~30% more tokens for the same text, so max_tokens
+# below was given some extra headroom rather than left at the old value.
+MODEL = "claude-sonnet-5"
 
 # Lazy singleton, same pattern as resume_search.py: the Anthropic client
 # isn't created until the first tool call actually needs it. That means
@@ -115,7 +121,7 @@ Respond ONLY with a JSON object in this exact format, no preamble, no markdown:
 
     response = _get_client().messages.create(
         model=MODEL,
-        max_tokens=1500,
+        max_tokens=2048,
         # This "tools" parameter is what actually lets Claude search the
         # web instead of answering purely from what it already knows.
         tools=[{"type": "web_search_20250305", "name": "web_search"}],

@@ -10,11 +10,11 @@ company research as local siblings inside this same server package, so the
 whole thing runs from one self-contained project instead of two repos glued
 together with a path hack.
 
-NOTE: the original phase3_cover_letter.py hardcodes MODEL = "claude-sonnet-4-6",
-while react-agent-toolkit's step3_agent_loop.py uses "claude-sonnet-5" for the
-agent's own reasoning calls. Kept as-is here to match the source file exactly —
-worth deciding deliberately whether to standardize on one model across every
-Claude call in this server, rather than inheriting the mismatch silently.
+Standardized on claude-sonnet-5 across every Claude call in this server —
+this file, company_research.py, and react-agent-toolkit's agent loop now
+all agree on one model, closing the mismatch flagged in an earlier version
+of this comment (this file was on sonnet-4-6, the agent loop was already
+on sonnet-5).
 
 NOTE: this is an ANNOTATED copy for learning. The actual project file
 (tools/cover_letter.py) has the same logic without these extra comments.
@@ -38,7 +38,7 @@ from .company_research import research_company
 
 load_dotenv()
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 COVER_LETTER_DIR = Path("data/cover_letters")
 
 # The "personality" instructions — this never changes per-request, so
@@ -127,7 +127,7 @@ Instructions:
 
     response = _get_client().messages.create(
         model=MODEL,
-        max_tokens=1024,
+        max_tokens=1536,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
