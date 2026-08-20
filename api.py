@@ -3,9 +3,9 @@ FastAPI wrapper around the MCP server.
 
 This is the "served over HTTP via FastAPI" layer from your roadmap. One
 process, one port: FastAPI owns plain REST endpoints like /health, and MCP
-traffic is mounted underneath at /mcp. Auth/rate-limiting middleware (added
-in a later step) wraps the whole app, so it protects the MCP endpoint too
-without any MCP-specific auth code.
+traffic is mounted underneath at /mcp. Auth/rate-limiting middleware wraps
+the whole app, so it protects the MCP endpoint too without any MCP-specific
+auth code.
 
 Run locally with:
     uvicorn api:app --reload
@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
 from server import mcp
+from middleware import AuthMiddleware, RateLimitMiddleware
 
 # mcp.http_app() builds the actual ASGI app that speaks the MCP protocol
 # over streamable HTTP. path="/" means it answers at the mount point
@@ -25,6 +26,15 @@ mcp_app = mcp.http_app(path="/")
 # initialized" error. This is the single most common mistake when mounting
 # FastMCP inside FastAPI.
 app = FastAPI(title="Job Assistant MCP Server", lifespan=mcp_app.lifespan)
+
+# Middleware registration order matters: Starlette wraps these in REVERSE
+# order of how they're added, so the LAST one added runs FIRST on every
+# incoming request. Adding RateLimitMiddleware first and AuthMiddleware
+# second means AuthMiddleware checks the key before RateLimitMiddleware
+# even starts counting - an unauthorized visitor doesn't get to "use up"
+# a rate-limit slot.
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(AuthMiddleware)
 
 
 @app.get("/")
