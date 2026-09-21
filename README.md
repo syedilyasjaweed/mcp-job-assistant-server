@@ -4,6 +4,8 @@ An [MCP](https://modelcontextprotocol.io) server that exposes three job-search t
 
 The tools themselves started life inside [`react-agent-toolkit`](https://github.com/syedilyasjaweed/react-agent-toolkit), where a single script both decided *which* tool to call and executed it. This project splits those responsibilities: the server hosts the tools and has no opinion about when to use them, and the reasoning loop moves to whatever MCP client connects — Claude Desktop, a custom agent, or anything else that speaks the protocol.
 
+The server is containerized with Docker and deployed on **Azure Container Apps**, so clients connect to a public HTTPS endpoint instead of a local process. See [Deployment](#deployment).
+
 ---
 
 ## Why MCP
@@ -99,6 +101,87 @@ curl http://127.0.0.1:8000/health
 
 ---
 
+## Deployment
+
+### Docker
+
+```bash
+docker build -t mcp-job-assistant .
+docker run --rm -p 8000:8000 --env-file .env mcp-job-assistant
+
+curl http://localhost:8000/health
+# {"status":"ok"}
+```
+
+Two choices in the [Dockerfile](Dockerfile) are deliberate:
+
+- **`requirements.txt` is copied before the source code.** Docker caches each layer, so dependencies are only reinstalled when `requirements.txt` changes, not on every code edit.
+- **`.env` never enters the image.** It is excluded by `.dockerignore` and injected at runtime with `--env-file`, so secrets don't end up baked into a layer or pushed to a registry.
+
+### Azure Container Apps
+
+```
+docker build  ->  Azure Container Registry  ->  Azure Container Apps
+ (linux/amd64)     (image storage)              (runs the container, public HTTPS ingress)
+```
+
+Azure Container Apps was chosen for scale-to-zero pricing: when nothing is calling the server, no compute cost accrues. The tradeoff is a slower first request after an idle period while the container starts.
+
+```bash
+# 1. Resource group and container registry
+az group create --name mcp-job-assistant-rg --location eastus
+az acr create --resource-group mcp-job-assistant-rg --name mcpjobassistantacr --sku Basic
+az acr login --name mcpjobassistantacr
+
+# 2. Build for linux/amd64 and push.
+#    The platform flag matters when building on Apple Silicon, which defaults to arm64.
+docker buildx build --platform linux/amd64 \
+  -t mcpjobassistantacr.azurecr.io/mcp-job-assistant:v1 --push .
+
+# 3. Container Apps environment and the app itself
+az containerapp env create \
+  --name mcp-job-assistant-env \
+  --resource-group mcp-job-assistant-rg \
+  --location eastus
+
+az containerapp create \
+  --name mcp-job-assistant-app \
+  --resource-group mcp-job-assistant-rg \
+  --environment mcp-job-assistant-env \
+  --image mcpjobassistantacr.azurecr.io/mcp-job-assistant:v1 \
+  --registry-server mcpjobassistantacr.azurecr.io \
+  --target-port 8000 --ingress external \
+  --min-replicas 0
+  # plus registry credentials or a managed identity with AcrPull
+
+# 4. Runtime configuration: the four keys from .env
+az containerapp update \
+  --name mcp-job-assistant-app \
+  --resource-group mcp-job-assistant-rg \
+  --set-env-vars ANTHROPIC_API_KEY=<value> VOYAGE_API_KEY=<value> \
+                 PINECONE_API_KEY=<value> API_KEY=<value>
+
+# 5. Find the public address and check it
+az containerapp show --name mcp-job-assistant-app --resource-group mcp-job-assistant-rg \
+  --query properties.configuration.ingress.fqdn -o tsv
+
+curl https://<fqdn>/health
+```
+
+**Shipping a change:** rebuild with a new tag, push, then point the app at it.
+
+```bash
+docker buildx build --platform linux/amd64 \
+  -t mcpjobassistantacr.azurecr.io/mcp-job-assistant:v2 --push .
+
+az containerapp update --name mcp-job-assistant-app --resource-group mcp-job-assistant-rg \
+  --image mcpjobassistantacr.azurecr.io/mcp-job-assistant:v2
+```
+
+**Why host it instead of sharing keys.** The Anthropic, Voyage AI and Pinecone keys live only in the Azure app's environment and never leave the server. A client needs just the `API_KEY` to call the tools, so access can be given or revoked without handing out provider credentials.
+
+---
+
 ## Connecting a client
 
 `test_client.py` connects and lists the published tools:
@@ -115,6 +198,8 @@ Discovered 3 tools:
   input schema keys: ['query', 'top_k']
 ...
 ```
+
+`test_client.py` points at `http://127.0.0.1:8000/mcp`. To test the deployed server, change `url` to `https://<fqdn>/mcp` and use the `API_KEY` set on the Azure app.
 
 One wrinkle worth knowing if you write your own client: `Client("http://...")` accepts a URL string but gives you nowhere to attach headers, and this server requires `X-API-Key` on every request. Construct the transport explicitly instead:
 
@@ -159,6 +244,8 @@ Both guards are registered on the FastAPI app rather than on individual routes, 
 
 The rate limiter keeps counts in an in-memory dict, which is fine for local development and a single process. It resets on restart and doesn't share state across workers, so multiple Uvicorn workers or multiple containers behind a load balancer would each count independently. Moving to Redis is the fix, and is a prerequisite for scaling past one process.
 
+On Azure this has two practical consequences: counts reset whenever the app scales to zero or restarts, and each replica counts separately. Traffic also reaches the container through Azure's ingress proxy, so the limiter needs to be checked against real client IPs rather than the proxy's address (see [Planned](#planned)).
+
 ---
 
 ## Troubleshooting
@@ -173,14 +260,16 @@ The rate limiter keeps counts in an in-memory dict, which is fine for local deve
 
 **`429 Rate limit exceeded`** — more than 30 requests from one IP inside 60 seconds. Wait out the window, or raise `RATE_LIMIT` in `middleware.py` for local testing.
 
+**Container won't start on Azure / `exec format error`** — the image was built for the wrong CPU architecture. Apple Silicon builds `arm64` by default; Container Apps runs `linux/amd64`. Rebuild with `--platform linux/amd64`.
+
+**`401` from the deployed `/mcp` but `/health` works** — the `API_KEY` environment variable isn't set on the Azure app, or differs from what the client sends. Set it with `az containerapp update --set-env-vars`.
+
 ---
 
 ## Planned
 
-- **Docker** — containerize so the server runs identically anywhere
-- **Cloud deployment** — a public, always-on address (AWS ECS Fargate or Azure Container Apps)
-- **Redis-backed rate limiting** — required before running more than one worker
-- **Eval harness** — RAGAS over the resume search retrieval scores, to measure retrieval quality rather than eyeballing it
+- **CI/CD** — GitHub Actions to build, tag, push and run `az containerapp update` on every change, replacing the manual steps above
+- **Forwarded-header handling** — confirm the limiter sees real client IPs behind Azure's ingress (Uvicorn `--proxy-headers` and trusted forwarded IPs)
 
 ---
 
@@ -196,6 +285,8 @@ mcp-job-assistant-server/
 ├── api.py                     # FastAPI app, mounts MCP at /mcp
 ├── middleware.py              # AuthMiddleware, RateLimitMiddleware
 ├── test_client.py             # MCP client for verifying the server
+├── Dockerfile                 # python:3.11-slim, dependency layer cached
+├── .dockerignore              # keeps .env and local files out of the image
 ├── requirements.txt
 └── .env.example
 ```
