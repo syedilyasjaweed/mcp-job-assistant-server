@@ -244,7 +244,7 @@ Both guards are registered on the FastAPI app rather than on individual routes, 
 
 The rate limiter keeps counts in an in-memory dict, which is fine for local development and a single process. It resets on restart and doesn't share state across workers, so multiple Uvicorn workers or multiple containers behind a load balancer would each count independently. Moving to Redis is the fix, and is a prerequisite for scaling past one process.
 
-On Azure this has two practical consequences: counts reset whenever the app scales to zero or restarts, and each replica counts separately. Traffic also reaches the container through Azure's ingress proxy, so the limiter needs to be checked against real client IPs rather than the proxy's address (see [Planned](#planned)).
+On Azure this has two practical consequences: counts reset whenever the app scales to zero or restarts, and each replica counts separately. Traffic also reaches the container through Azure's ingress proxy, so unless forwarded headers are trusted, the limiter may see the proxy's address rather than each caller's real IP.
 
 ---
 
@@ -263,13 +263,6 @@ On Azure this has two practical consequences: counts reset whenever the app scal
 **Container won't start on Azure / `exec format error`** — the image was built for the wrong CPU architecture. Apple Silicon builds `arm64` by default; Container Apps runs `linux/amd64`. Rebuild with `--platform linux/amd64`.
 
 **`401` from the deployed `/mcp` but `/health` works** — the `API_KEY` environment variable isn't set on the Azure app, or differs from what the client sends. Set it with `az containerapp update --set-env-vars`.
-
----
-
-## Planned
-
-- **CI/CD** — GitHub Actions to build, tag, push and run `az containerapp update` on every change, replacing the manual steps above
-- **Forwarded-header handling** — confirm the limiter sees real client IPs behind Azure's ingress (Uvicorn `--proxy-headers` and trusted forwarded IPs)
 
 ---
 
